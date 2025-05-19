@@ -1,6 +1,6 @@
 import React from 'react';
 
-const Header = ({ primaryMCP, onChatsClick, onSettingsClick }) => {
+const Header = ({ primaryMCP, title = 'Chat Session', onChatsClick, onSettingsClick }) => {
   return (
     <div className="app-header">
       <button className="header-button chats-button" onClick={onChatsClick}>
@@ -8,7 +8,7 @@ const Header = ({ primaryMCP, onChatsClick, onSettingsClick }) => {
         <span>Chats</span>
       </button>
       <div className="header-title">
-        <h1>Chat Session</h1>
+        <h1>{title}</h1>
         <div className="model-badge">{primaryMCP}</div>
       </div>
       <button className="header-button settings-button" onClick={onSettingsClick}>

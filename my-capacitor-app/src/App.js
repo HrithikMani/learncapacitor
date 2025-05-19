@@ -5,36 +5,43 @@ import MessageList from './components/MessageList';
 import InputArea from './components/InputArea';
 import ChatsModal from './components/ChatsModal';
 import SettingsModal from './components/SettingsModal';
+import Toast from './components/Toast';
+import claudeApiService from './services/claudeApiService'; // Import from your service file
 
 function App() {
   // State management
-  const [messages, setMessages] = useState([
-    { id: 1, sender: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date().toISOString() },
-  ]);
+  const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showChats, setShowChats] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [currentTitle, setCurrentTitle] = useState('Chat Session');
+  const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
   
-  // New MCP management with multiple active MCPs
+  // Keep MCP states for the UI - in a real app this might be replaced
   const [mcpList, setMcpList] = useState([
-    { id: 'default', name: 'Default AI', endpoint: 'https://api.default-ai.com', type: 'general', isDefault: true },
-    { id: 'mcp2', name: 'Product Catalog', endpoint: 'https://api.products.com', type: 'products' },
-    { id: 'mcp3', name: 'Order Management', endpoint: 'https://api.orders.com', type: 'orders' },
-    { id: 'mcp4', name: 'Customer Support', endpoint: 'https://api.support.com', type: 'users' },
-    { id: 'mcp5', name: 'Analytics Engine', endpoint: 'https://api.analytics.com', type: 'analytics' },
+    { id: 'default', name: 'Claude AI', endpoint: '/api/claude', type: 'general', isDefault: true },
   ]);
-  
-  // Store active MCPs as an array of IDs
   const [activeMCPs, setActiveMCPs] = useState(['default']);
   
-  const [isTyping, setIsTyping] = useState(false);
-  const [conversations, setConversations] = useState([
-    { id: 'conv1', title: 'Project Planning', date: '2 hours ago', preview: 'Let\'s discuss the timeline for...' },
-    { id: 'conv2', title: 'Research Assistant', date: 'Yesterday', preview: 'I need help finding sources on...' },
-    { id: 'conv3', title: 'Code Review Help', date: 'May 2', preview: 'Can you check this function for...' },
-  ]);
-  
   const messagesEndRef = useRef(null);
+  
+  // Load conversations on mount
+  useEffect(() => {
+    fetchConversations();
+  }, []);
+  
+  // Load conversation when sessionId changes
+  useEffect(() => {
+    if (currentSessionId) {
+      fetchConversationHistory(currentSessionId);
+    } else {
+      // If no session, start with empty messages
+      setMessages([]);
+    }
+  }, [currentSessionId]);
   
   // Scroll to bottom of messages
   useEffect(() => {
@@ -43,76 +50,183 @@ function App() {
     }
   }, [messages]);
   
-  // API service functions
-  const aiService = {
-    // Simulate AI response with active MCPs
-    getResponse: (userMessage) => {
-      setIsTyping(true);
-      
-      // Get active MCP names for response
-      const activeMCPNames = activeMCPs.map(id => {
-        const mcp = mcpList.find(m => m.id === id);
-        return mcp ? mcp.name : null;
-      }).filter(Boolean);
-      
-      // Simulate AI thinking time
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          if (activeMCPNames.length > 1) {
-            // If multiple MCPs are active
-            resolve(`I'm using multiple tools to answer (${activeMCPNames.join(', ')}). Based on the available information, I can help with that request.`);
-          } else {
-            // If only one MCP is active
-            const responses = [
-              "I understand what you're asking about. Let me elaborate on that...",
-              "That's an interesting question! Here's what I know about it...",
-              "I'll help you with that. Based on my knowledge...",
-              "Great question! Here's my analysis...",
-              "I can assist with that. Here's some information that might help...",
-            ];
-            const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-            resolve(randomResponse);
-          }
-          
-          setIsTyping(false);
-        }, 1500);
-      });
+  // Show a toast notification
+  const showToast = (message, type = 'info') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => {
+      setToast({ show: false, message: '', type: 'info' });
+    }, 3000);
+  };
+  
+  // Fetch all conversations
+  const fetchConversations = async () => {
+    try {
+      const response = await claudeApiService.getAllConversations();
+      if (response.status === 'success') {
+        // Format the conversations for the UI
+        const formattedConversations = response.data.conversations.map(conv => ({
+          id: conv.sessionId,
+          title: conv.title,
+          date: formatDate(conv.lastUpdated),
+          preview: `${conv.messageCount} messages`,
+          messageCount: conv.messageCount
+        }));
+        setConversations(formattedConversations);
+      }
+    } catch (error) {
+      console.error('Failed to fetch conversations:', error);
+      showToast('Failed to load conversations', 'error');
     }
   };
   
+  // Format relative date (e.g., "2 hours ago")
+  const formatDate = (dateString) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffInHours = Math.floor((now - date) / (1000 * 60 * 60));
+    
+    if (diffInHours < 1) return 'Just now';
+    if (diffInHours < 24) return `${diffInHours} hour${diffInHours > 1 ? 's' : ''} ago`;
+    if (diffInHours < 48) return 'Yesterday';
+    return date.toLocaleDateString();
+  };
+  
+  // Fetch conversation history
+  const fetchConversationHistory = async (sessionId) => {
+    try {
+      const response = await claudeApiService.getHistory(sessionId);
+      if (response.status === 'success') {
+        setMessages(response.data.messages.map((msg, index) => ({
+          id: index,
+          sender: msg.role,
+          content: msg.content,
+          timestamp: msg.createdAt || new Date().toISOString()
+        })));
+        setCurrentTitle(response.data.title);
+      }
+    } catch (error) {
+      console.error('Failed to fetch conversation history:', error);
+      showToast('Failed to load conversation history', 'error');
+    }
+  };
+  
+  // Message handling functions
+  const messageHandlers = {
+    // Send a new message
+    sendMessage: async () => {
+      if (inputMessage.trim() === '') return;
+      
+      // Create and display user message immediately
+      const userMessage = {
+        id: Date.now(),
+        sender: 'user',
+        content: inputMessage,
+        timestamp: new Date().toISOString()
+      };
+      
+      setMessages(prev => [...prev, userMessage]);
+      const currentInput = inputMessage;
+      setInputMessage('');
+      
+      // Show typing indicator
+      setIsTyping(true);
+      
+      let sessionId = currentSessionId;
+      
+      try {
+        // If no current session, a new one will be created automatically by the API
+        const response = await claudeApiService.sendMessage(sessionId, currentInput);
+        
+        if (response.status === 'success') {
+          // If this was a new conversation, update the sessionId
+          if (!sessionId) {
+            setCurrentSessionId(response.data.session_id);
+            setCurrentTitle(response.data.title);
+            
+            // Refresh conversations list
+            fetchConversations();
+          }
+          
+          // Add AI response
+          setMessages(prev => [...prev, {
+            id: Date.now() + 1,
+            sender: 'ai',
+            content: response.data.message,
+            timestamp: new Date().toISOString()
+          }]);
+        }
+      } catch (error) {
+        console.error('Error sending message:', error);
+        // Add error message to the chat
+        setMessages(prev => [...prev, {
+          id: Date.now() + 1,
+          sender: 'system',
+          content: 'Sorry, there was an error sending your message. Please try again.',
+          timestamp: new Date().toISOString()
+        }]);
+        showToast('Failed to send message', 'error');
+      } finally {
+        setIsTyping(false);
+      }
+    },
+    
+    // Copy message to clipboard
+    copyMessage: (content) => {
+      navigator.clipboard.writeText(content);
+      showToast('Message copied to clipboard', 'success');
+    }
+  };
+
   // Conversations service
   const conversationsService = {
     // Select a conversation
     selectConversation: (conversationId) => {
-      // In a real app, you'd load the conversation messages here
+      setCurrentSessionId(conversationId);
       setShowChats(false);
     },
     
     // Start a new chat
-    startNewChat: () => {
-      setMessages([{ id: 1, sender: 'ai', content: 'Hello! How can I assist you today?', timestamp: new Date().toISOString() }]);
+    startNewChat: async () => {
+      setCurrentSessionId(null);
+      setCurrentTitle('New Chat');
+      setMessages([]);
       setShowChats(false);
+    },
+    
+    // Delete conversation
+    deleteConversation: async (conversationId) => {
+      try {
+        await claudeApiService.deleteConversation(conversationId);
+        showToast('Conversation deleted', 'success');
+        
+        // Refresh the conversations list
+        fetchConversations();
+        
+        // If the deleted conversation was the current one, start a new chat
+        if (currentSessionId === conversationId) {
+          conversationsService.startNewChat();
+        }
+      } catch (error) {
+        console.error('Failed to delete conversation:', error);
+        showToast('Failed to delete conversation', 'error');
+      }
     }
   };
   
-  // MCP service functions
+  // MCP service functions (mostly UI-related in this integration)
   const mcpService = {
-    // Toggle MCP active status
     toggleMCP: (mcpId) => {
       setActiveMCPs(prev => {
-        // If MCP is already active, remove it (except for default MCP which must stay active)
         if (prev.includes(mcpId)) {
           if (mcpId === 'default' || prev.length === 1) {
             return prev; // Keep at least one MCP active
           }
           return prev.filter(id => id !== mcpId);
         } 
-        // Otherwise add it to active MCPs
         return [...prev, mcpId];
       });
     },
     
-    // Add a new MCP
     addMCP: (mcpData) => {
       const newMCP = {
         id: `mcp-${Date.now()}`,
@@ -123,57 +237,19 @@ function App() {
       };
       
       setMcpList(prev => [...prev, newMCP]);
+      showToast(`${mcpData.name} added successfully`, 'success');
       return true;
     },
     
-    // Delete an MCP
     deleteMCP: (id) => {
-      // Remove from active MCPs if it's active
       if (activeMCPs.includes(id)) {
         setActiveMCPs(prev => prev.filter(mcpId => mcpId !== id));
       }
       
-      // Remove from MCP list
+      const mcpName = mcpList.find(mcp => mcp.id === id)?.name || 'MCP';
       setMcpList(prev => prev.filter(mcp => mcp.id !== id));
+      showToast(`${mcpName} removed`, 'info');
       return true;
-    }
-  };
-  
-  // Message handling functions
-  const messageHandlers = {
-    // Send a new message
-    sendMessage: async () => {
-      if (inputMessage.trim() === '') return;
-      
-      const newMessage = {
-        id: Date.now(),
-        sender: 'user',
-        content: inputMessage,
-        timestamp: new Date().toISOString()
-      };
-      
-      setMessages(prev => [...prev, newMessage]);
-      const currentInput = inputMessage;
-      setInputMessage('');
-      
-      // Get AI response
-      try {
-        const response = await aiService.getResponse(currentInput);
-        setMessages(prev => [...prev, {
-          id: Date.now(),
-          sender: 'ai',
-          content: response,
-          timestamp: new Date().toISOString()
-        }]);
-      } catch (error) {
-        console.error('Error getting AI response:', error);
-      }
-    },
-    
-    // Copy message to clipboard
-    copyMessage: (content) => {
-      navigator.clipboard.writeText(content);
-      // Would show a toast notification in a real app
     }
   };
 
@@ -191,6 +267,7 @@ function App() {
     <div className="app-container">
       <Header 
         primaryMCP={getPrimaryMCP()}
+        title={currentTitle}
         onChatsClick={() => setShowChats(true)}
         onSettingsClick={() => setShowSettings(true)}
       />
@@ -208,6 +285,7 @@ function App() {
         inputMessage={inputMessage}
         setInputMessage={setInputMessage}
         onSendMessage={messageHandlers.sendMessage}
+        isFirstMessage={messages.length === 0}
       />
       
       {showChats && (
@@ -216,6 +294,7 @@ function App() {
           onClose={() => setShowChats(false)}
           onSelectConversation={conversationsService.selectConversation}
           onNewChat={conversationsService.startNewChat}
+          onDeleteConversation={conversationsService.deleteConversation}
         />
       )}
       
@@ -227,6 +306,14 @@ function App() {
           onToggleMCP={mcpService.toggleMCP}
           onDeleteMCP={mcpService.deleteMCP}
           onAddMCP={mcpService.addMCP}
+        />
+      )}
+      
+      {toast.show && (
+        <Toast 
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast({ show: false, message: '', type: 'info' })}
         />
       )}
     </div>

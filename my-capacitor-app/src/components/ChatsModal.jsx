@@ -1,6 +1,6 @@
 import React from 'react';
 
-const ChatsModal = ({ conversations, onClose, onSelectConversation, onNewChat }) => {
+const ChatsModal = ({ conversations, onClose, onSelectConversation, onNewChat, onDeleteConversation }) => {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="sidebar" onClick={(e) => e.stopPropagation()}>
@@ -19,14 +19,27 @@ const ChatsModal = ({ conversations, onClose, onSelectConversation, onNewChat })
             <div 
               key={conv.id} 
               className="conversation-item"
-              onClick={() => onSelectConversation(conv.id)}
             >
-              <div className="conversation-icon">💬</div>
-              <div className="conversation-info">
+              <div 
+                className="conversation-info"
+                onClick={() => onSelectConversation(conv.id)}
+              >
                 <div className="conversation-title">{conv.title}</div>
                 <div className="conversation-preview">{conv.preview}</div>
                 <div className="conversation-date">{conv.date}</div>
               </div>
+              <button 
+                className="delete-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm('Are you sure you want to delete this conversation?')) {
+                    onDeleteConversation(conv.id);
+                  }
+                }}
+                title="Delete conversation"
+              >
+                🗑️
+              </button>
             </div>
           ))}
           

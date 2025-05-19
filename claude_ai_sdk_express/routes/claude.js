@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const claudeController = require('../controllers/claude.controller');
@@ -10,5 +11,14 @@ router.use(authMiddleware.authenticate);
 router.post('/chat', claudeController.chatCompletion);
 router.get('/history/:sessionId', claudeController.getHistory);
 router.delete('/history/:sessionId', claudeController.clearHistory);
+
+// Streaming endpoint
+router.post('/stream', claudeController.streamChat);
+
+// New conversation management endpoints
+router.post('/conversations', claudeController.createConversation);
+router.get('/conversations', claudeController.getAllConversations);
+router.put('/conversations/:sessionId/title', claudeController.updateTitle);
+router.delete('/conversations/:sessionId', claudeController.deleteConversation);
 
 module.exports = router;
