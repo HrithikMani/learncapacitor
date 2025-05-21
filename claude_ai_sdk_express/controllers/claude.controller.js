@@ -1,4 +1,3 @@
-// controllers/claude.controller.js
 require('dotenv').config();
 
 // Import dependencies
@@ -10,31 +9,76 @@ const conversationService = require('../services/conversation.service');
 const DEFAULT_MODEL = 'claude-3-7-sonnet-20250219';
 const DEFAULT_MAX_TOKENS = 1000;
 const DEFAULT_TEMPERATURE = 0.7;
-const DEFAULT_SYSTEM_PROMPT = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest. You have access to various tools to help you. You need to take whatever response you get from the tool and give a human-like response to the user.";
+const DEFAULT_SYSTEM_PROMPT = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest. You have access to various tools to help you. You need to take whatever response you get from the tool and give a human-like response to the user. if you don't find any specifi tool you are free to explore.";
 const MAX_TOOL_STEPS = 10;
-const MCP_SERVICE_URL = "http://localhost:8081/sse";
-const MCP_SERVICE_NAME = "Calculator service";
+
+// Array of MCP service configurations
+const MCP_SERVICES = [
+  {
+    url: "http://localhost:8081/sse",
+    name: "Calculator service"
+  },
+  {
+    url: "http://localhost:8082/sse",
+    name: "Notepad service"
+  }
+  // Add more services as needed
+];
 
 /**
- * Initialize MCP client and get available tools
- * @returns {Promise<Object>} Available tools or null if error
+ * Initialize MCP clients and get available tools from all services
+ * @returns {Promise<Object>} Combined available tools or empty object if all failed
  */
 const initializeTools = async () => {
-  try {
-    const mcpClient = await experimental_createMCPClient({
-      transport: {
-        type: "sse",
-        url: MCP_SERVICE_URL,
-      },
-      name: MCP_SERVICE_NAME,
-    });
-    const tools = await mcpClient.tools();
-    console.log(`Initialized ${Object.keys(tools).length} tools from MCP client`);
-    return tools;
-  } catch (error) {
-    console.error('Failed to initialize tools:', error);
-    return null;
-  }
+  let combinedTools = {};
+  let successfulServices = 0;
+  let failedServices = 0;
+  
+  // Process each service in parallel
+  await Promise.all(MCP_SERVICES.map(async (service) => {
+    try {
+      console.log(`Initializing MCP client for ${service.name} at ${service.url}`);
+      
+      const mcpClient = await experimental_createMCPClient({
+        transport: {
+          type: "sse",
+          url: service.url,
+        },
+        name: service.name,
+      });
+      
+      const serviceTools = await mcpClient.tools();
+      
+      if (serviceTools && Object.keys(serviceTools).length > 0) {
+        console.log(`Initialized ${Object.keys(serviceTools).length} tools from ${service.name}`);
+        
+        // Add a prefix to avoid tool name collisions between services
+        // Or alternatively, merge tools directly if you prefer
+        Object.entries(serviceTools).forEach(([toolName, toolObject]) => {
+          // Option 1: Use service name as prefix to prevent collisions
+          // const prefixedToolName = `${service.name.replace(/\s+/g, '_').toLowerCase()}.${toolName}`;
+          // combinedTools[prefixedToolName] = toolObject;
+          
+          // Option 2: Direct merge (will overwrite tools with same names)
+          combinedTools[toolName] = toolObject;
+        });
+        
+        successfulServices++;
+      } else {
+        console.warn(`No tools found in service: ${service.name}`);
+        failedServices++;
+      }
+    } catch (error) {
+      console.error(`Failed to initialize tools from ${service.name}:`, error);
+      failedServices++;
+    }
+  }));
+  
+  // Log summary of service connection results
+  console.log(`MCP services summary: ${successfulServices} successful, ${failedServices} failed`);
+  console.log(`Total tools available: ${Object.keys(combinedTools).length}`);
+  
+  return Object.keys(combinedTools).length > 0 ? combinedTools : null;
 };
 
 /**
@@ -151,9 +195,10 @@ exports.chatCompletion = async (req, res) => {
       let result;
       let tools = null;
       
-      // Get tools if requested
+      // Get tools from all services if requested
       if (useTools) {
         tools = await initializeTools();
+        console.log(`Using ${tools ? Object.keys(tools).length : 0} tools from all services`);
       }
 
       // Generate text with or without tools
@@ -271,9 +316,9 @@ exports.streamChat = async (req, res) => {
     const { sessionId, conversation, messages } = await initializeConversation(providedSessionId, prompt);
     console.log(`Using session ID: ${sessionId}`);
 
-    // Initialize tools for streaming
+    // Initialize tools from all services
     const tools = await initializeTools();
-    console.log(`Tools initialized: ${tools ? Object.keys(tools).length : 'none'}`);
+    console.log(`Tools initialized from all services: ${tools ? Object.keys(tools).length : 'none'}`);
 
     // Set up streaming response headers
     setupSSEHeaders(res);
