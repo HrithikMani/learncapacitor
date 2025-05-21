@@ -3,13 +3,6 @@ import React from 'react';
 const Message = ({ message, activeMCPName, formatTime, onCopyMessage, isStreaming }) => {
   const isUser = message.sender === 'user';
   
-  // Debug render
-  console.log(`Rendering message from ${message.sender}:`, {
-    contentType: typeof message.content,
-    isArray: Array.isArray(message.content),
-    isStreaming
-  });
-  
   // Helper function to render content, whether it's a string or structured format
   const renderContent = (content) => {
     // If content is empty, null or undefined
@@ -24,7 +17,13 @@ const Message = ({ message, activeMCPName, formatTime, onCopyMessage, isStreamin
     
     // If content is an array (structured content from Claude)
     if (Array.isArray(content)) {
-      return content.map((item, index) => {
+      // Filter out tool calls and tool results
+      const filteredContent = content.filter(item => 
+        !(item && (item.type === 'tool-call' || item.type === 'tool-result'))
+      );
+      
+      // Map and render the remaining content
+      return filteredContent.map((item, index) => {
         if (typeof item === 'string') {
           return <span key={index}>{item}</span>;
         }
@@ -32,32 +31,6 @@ const Message = ({ message, activeMCPName, formatTime, onCopyMessage, isStreamin
         // Handle content object with type/text structure
         if (item && item.type === 'text') {
           return <span key={index}>{item.text}</span>;
-        }
-        
-        // For tool calls or other structured content, show a simple representation
-        if (item && item.type === 'tool-call') {
-          return (
-            <div key={index} className="tool-call">
-              <div className="tool-call-header">Using tool: {item.toolName}</div>
-              <div className="tool-call-args">
-                {JSON.stringify(item.args, null, 2)}
-              </div>
-            </div>
-          );
-        }
-        
-        // For tool results
-        if (item && item.type === 'tool-result') {
-          return (
-            <div key={index} className="tool-result">
-              <div className="tool-result-header">Tool result from: {item.toolName}</div>
-              <div className="tool-result-content">
-                {item.result && item.result.content ? 
-                  renderContent(item.result.content) : 
-                  JSON.stringify(item.result, null, 2)}
-              </div>
-            </div>
-          );
         }
         
         // Fallback for unknown content types
@@ -78,13 +51,14 @@ const Message = ({ message, activeMCPName, formatTime, onCopyMessage, isStreamin
     }
     
     if (Array.isArray(content)) {
-      return content.map(item => {
+      // Also filter tool calls/results for copying
+      const filteredContent = content.filter(item =>
+        !(item && (item.type === 'tool-call' || item.type === 'tool-result'))
+      );
+      
+      return filteredContent.map(item => {
         if (typeof item === 'string') return item;
         if (item && item.type === 'text') return item.text;
-        if (item && item.type === 'tool-call') 
-          return `[Tool Call: ${item.toolName}]\n${JSON.stringify(item.args, null, 2)}`;
-        if (item && item.type === 'tool-result') 
-          return `[Tool Result: ${item.toolName}]\n${JSON.stringify(item.result, null, 2)}`;
         return JSON.stringify(item, null, 2);
       }).join('\n');
     }

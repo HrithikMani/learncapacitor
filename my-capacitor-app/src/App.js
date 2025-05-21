@@ -116,12 +116,83 @@ function App() {
       const response = await claudeApiService.getHistory(sessionId);
       if (response.status === 'success') {
         console.log(`Retrieved ${response.data.messages.length} messages`);
-        setMessages(response.data.messages.map((msg, index) => ({
-          id: index,
-          sender: msg.role,
-          content: msg.content,
-          timestamp: msg.createdAt || new Date().toISOString()
-        })));
+        
+        // Filter and combine messages
+        const processedMessages = [];
+        let currentUserMessage = null;
+        let currentAssistantMessage = null;
+        
+        // Process each message in order
+        for (const msg of response.data.messages) {
+          // Handle user messages
+          if (msg.role === 'user') {
+            // Push any pending assistant message
+            if (currentAssistantMessage) {
+              processedMessages.push(currentAssistantMessage);
+              currentAssistantMessage = null;
+            }
+            
+            // Create new user message
+            currentUserMessage = {
+              id: msg.id || `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+              sender: 'user',
+              content: msg.content,
+              timestamp: msg.createdAt || new Date().toISOString()
+            };
+            processedMessages.push(currentUserMessage);
+          }
+          // Handle assistant messages - only keep text content
+          else if (msg.role === 'assistant') {
+            // Extract only text elements from content if it's an array
+            let textContent = '';
+            
+            if (Array.isArray(msg.content)) {
+              // Only extract text content, skip tool calls
+              msg.content.forEach(item => {
+                if (item.type === 'text') {
+                  textContent += item.text;
+                }
+              });
+            } else {
+              textContent = msg.content;
+            }
+            
+            // Skip empty messages
+            if (textContent.trim() === '') continue;
+            
+            // Create or update assistant message
+            if (!currentAssistantMessage) {
+              currentAssistantMessage = {
+                id: msg.id || `assistant-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                sender: 'ai',
+                content: textContent,
+                timestamp: msg.createdAt || new Date().toISOString()
+              };
+            } else {
+              // If this appears to be a continuation of the previous message,
+              // append the content with a space between
+              currentAssistantMessage.content += ' ' + textContent;
+            }
+            
+            // If this seems like a complete message (ends with period, etc.), push it
+            if (textContent.trim().endsWith('.') || 
+                textContent.trim().endsWith('!') || 
+                textContent.trim().endsWith('?')) {
+              processedMessages.push(currentAssistantMessage);
+              currentAssistantMessage = null;
+            }
+          }
+          // Skip tool messages entirely - we only want to show the final result
+          // (which should be included in an assistant message)
+        }
+        
+        // Add any final assistant message that hasn't been pushed
+        if (currentAssistantMessage) {
+          processedMessages.push(currentAssistantMessage);
+        }
+        
+        console.log(`Processed ${processedMessages.length} messages for display`);
+        setMessages(processedMessages);
         setCurrentTitle(response.data.title);
       }
     } catch (error) {
@@ -193,14 +264,16 @@ function App() {
                 fetchConversations();
               }
             },
-            onChunk: (chunk) => {
+            onChunk: (chunk, messageId) => {
               console.log('Received chunk:', chunk ? chunk.length : 0, 'chars');
               // Update the streaming response with each new chunk
               setStreamingResponse(prev => {
+                const messageIdToUse = messageId || Date.now();
+                
                 if (!prev) {
                   console.warn('No streaming response object to update');
                   return {
-                    id: Date.now(),
+                    id: messageIdToUse,
                     sender: 'ai',
                     content: chunk || '',
                     timestamp: new Date().toISOString(),
@@ -211,11 +284,12 @@ function App() {
                 // Basic string content
                 return {
                   ...prev,
+                  id: messageIdToUse, // Use the consistent ID
                   content: prev.content + (chunk || '')
                 };
               });
             },
-            onComplete: () => {
+            onComplete: (messageId) => {
               console.log('Stream completed');
               setStreamingResponse(prev => {
                 if (!prev) {
@@ -226,13 +300,27 @@ function App() {
                 console.log('Finalizing message with content length:', 
                   typeof prev.content === 'string' ? prev.content.length : 'complex structure');
                 
+                // Skip if the content is empty or too small
+                if (!prev.content || prev.content.trim().length < 2) {
+                  return null; // Don't add empty messages
+                }
+                
                 // Add completed message to messages
-                setMessages(messages => [...messages, {
-                  id: prev.id,
-                  sender: 'ai',
-                  content: prev.content,
-                  timestamp: prev.timestamp
-                }]);
+                setMessages(messages => {
+                  // Use the consistent message ID
+                  const finalMessageId = messageId || prev.id;
+                  
+                  // Check if we already have a message with this ID
+                  const messageExists = messages.some(msg => msg.id === finalMessageId);
+                  
+                  // Only add if it doesn't exist already
+                  return messageExists ? messages : [...messages, {
+                    id: finalMessageId,
+                    sender: 'ai',
+                    content: prev.content,
+                    timestamp: prev.timestamp,
+                  }];
+                });
                 return null; // Clear streaming state
               });
               setIsTyping(false);

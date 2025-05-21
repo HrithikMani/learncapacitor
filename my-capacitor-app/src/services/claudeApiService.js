@@ -37,7 +37,7 @@ const claudeApiService = {
     }
   },
   
-  // Stream chat with Claude - improved direct streaming
+  // Stream chat with Claude - improved direct streaming with fixes
   streamMessage: (sessionId, prompt, model = 'claude-3-7-sonnet-20250219', callbacks) => {
     console.log('Starting streaming request');
     
@@ -45,7 +45,11 @@ const claudeApiService = {
     const controller = new AbortController();
     const signal = controller.signal;
     
-    // Make a POST request with proper headers for streaming
+    // Add tracking for message ID consistency
+    let isFirstChunk = true;
+    let finalMessageId = null;
+    let reader = null; // Declare reader at a higher scope
+    
     fetch(`${API_BASE_URL}/stream`, {
       method: 'POST',
       headers,
@@ -71,7 +75,7 @@ const claudeApiService = {
       console.log('Stream response received, processing chunks');
       
       // Get a reader from the response body stream
-      const reader = response.body.getReader();
+      reader = response.body.getReader(); // Assign to our higher-scoped reader variable
       const decoder = new TextDecoder();
       let buffer = '';
       
@@ -86,7 +90,8 @@ const claudeApiService = {
               processBuffer(buffer);
             }
             
-            callbacks.onComplete();
+            // Pass the final message ID to onComplete
+            callbacks.onComplete(finalMessageId);
             return;
           }
           
@@ -135,15 +140,24 @@ const claudeApiService = {
             // Only log if there's actual content
             if (data.text && data.text.length > 0) {
               console.log(`Received chunk (${data.text.length} chars)`);
+              
+              // For the first chunk, we want to create a new message ID
+              if (isFirstChunk) {
+                finalMessageId = Date.now();
+                isFirstChunk = false;
+              }
+              
+              // Pass the message ID along with the chunk
+              callbacks.onChunk(data.text, finalMessageId);
             }
-            callbacks.onChunk(data.text);
           } else if (data.type === 'done') {
             console.log('Stream marked as done');
-            // We'll call onComplete when the stream is actually done
+            // Pass the final message ID to onComplete
+            callbacks.onComplete(finalMessageId);
           } else if (data.type === 'error') {
             console.error('Stream error:', data.error);
             callbacks.onError(new Error(data.error));
-            reader.cancel();
+            if (reader) reader.cancel(); // Now reader is defined and checked
           }
         } catch (jsonError) {
           console.error('Error parsing JSON from stream:', jsonError);
@@ -166,7 +180,7 @@ const claudeApiService = {
               const data = JSON.parse(dataMatch[1]);
               
               if (data.type === 'chunk') {
-                callbacks.onChunk(data.text);
+                callbacks.onChunk(data.text, finalMessageId);
               }
             } catch (error) {
               console.error('Error processing buffer remainder:', error);
@@ -187,6 +201,7 @@ const claudeApiService = {
     return {
       cancel: () => {
         console.log('Manually cancelling stream');
+        if (reader) reader.cancel(); // Check reader before cancelling
         controller.abort();
       }
     };
