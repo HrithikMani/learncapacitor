@@ -1,16 +1,17 @@
-
 const mongoose = require('mongoose');
 
-// Define schema for individual messages
+// Define schema for individual messages with support for structured content
 const messageSchema = new mongoose.Schema({
   role: {
     type: String,
-    enum: ['user', 'assistant', 'system'],
     required: true
   },
   content: {
-    type: String,
+    type: mongoose.Schema.Types.Mixed, // This allows for both string and array of objects
     required: true
+  },
+  id: {
+    type: String
   },
   createdAt: {
     type: Date,

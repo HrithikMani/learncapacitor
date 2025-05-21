@@ -2,7 +2,7 @@ const http = require('http');
 
 // Prepare the request data
 const data = JSON.stringify({
-  prompt: 'multiply 6 times 4',
+  prompt: 'multiply 6 times 4 and also explain how you got the answer',
   model: 'claude-3-7-sonnet-20250219'
 });
 
@@ -37,33 +37,47 @@ const req = http.request(options, (res) => {
       if (message.startsWith('data: ')) {
         try {
           const eventData = JSON.parse(message.slice(6));
-          console.log('Event Type:', eventData.type);
           
           if (eventData.type === 'chunk') {
+            // Text chunk - print without newline
             process.stdout.write(eventData.text || '');
           } else if (eventData.type === 'tool-call') {
-            console.log('\nTool Call:', eventData.toolName);
+            // Tool call - print details
+            console.log('\nUsing tool:', eventData.toolName);
+            console.log('With input:', JSON.stringify(eventData.toolInput));
           } else if (eventData.type === 'tool-result') {
-            console.log('\nTool Result:', eventData.result);
+            // Tool result - print details
+            console.log('\nTool result:', JSON.stringify(eventData.result));
           } else if (eventData.type === 'done') {
-            console.log('\nStream completed');
+            // Stream completed
+            console.log('\n--- Stream completed ---');
+          } else {
+            // Unknown event type
+            console.log('\nEvent:', eventData.type, eventData);
           }
         } catch (e) {
-          console.log('Raw data:', message.slice(6));
+          console.log('Error parsing:', message.slice(6), e);
         }
       }
     }
   });
   
   res.on('end', () => {
-    console.log('\nNo more data');
+    console.log('\nConnection closed');
+  });
+  
+  res.on('error', (e) => {
+    console.error('Response error:', e.message);
   });
 });
 
 req.on('error', (e) => {
-  console.error(`Problem with request: ${e.message}`);
+  console.error(`Request error: ${e.message}`);
 });
 
 // Write data to request body
 req.write(data);
 req.end();
+
+// Print a message when the request is sent
+console.log('Request sent, waiting for response...');

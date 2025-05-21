@@ -132,6 +132,11 @@ const createConversation = async (title = null) => {
 // Add message to conversation
 const addMessage = async (sessionId, message) => {
   try {
+    // Basic validation
+    if (!message.role || message.content === undefined) {
+      throw new Error('Invalid message format: role and content are required');
+    }
+
     // Check if MongoDB is connected
     if (isMongoConnected()) {
       // Use MongoDB
@@ -145,9 +150,22 @@ const addMessage = async (sessionId, message) => {
       if (conversation.title.startsWith('Conversation') && 
           conversation.messages.length === 1 && 
           message.role === 'user') {
-        // Use the first ~30 chars of the first message as the title
-        const titleText = message.content.substring(0, 30).trim();
-        conversation.title = titleText + (titleText.length >= 30 ? '...' : '');
+        let titleText;
+        
+        // Handle different content formats for title generation
+        if (typeof message.content === 'string') {
+          titleText = message.content.substring(0, 30).trim();
+        } else if (Array.isArray(message.content) && message.content.length > 0) {
+          // Try to extract text from the first text element if it's an array
+          const textItem = message.content.find(item => item.type === 'text');
+          if (textItem && textItem.text) {
+            titleText = textItem.text.substring(0, 30).trim();
+          }
+        }
+        
+        if (titleText) {
+          conversation.title = titleText + (titleText.length >= 30 ? '...' : '');
+        }
       }
       
       // Save the updated conversation
@@ -165,13 +183,26 @@ const addMessage = async (sessionId, message) => {
       
       sessionStorage[sessionId].messages.push(message);
       
-      // Generate a title from the first user message if title is default and this is the first message
+      // Generate a title from the first user message for in-memory storage too
       if (sessionStorage[sessionId].title.startsWith('Conversation') && 
           sessionStorage[sessionId].messages.length === 1 && 
           message.role === 'user') {
-        // Use the first ~30 chars of the first message as the title
-        const titleText = message.content.substring(0, 30).trim();
-        sessionStorage[sessionId].title = titleText + (titleText.length >= 30 ? '...' : '');
+        let titleText;
+        
+        // Handle different content formats for title generation
+        if (typeof message.content === 'string') {
+          titleText = message.content.substring(0, 30).trim();
+        } else if (Array.isArray(message.content) && message.content.length > 0) {
+          // Try to extract text from the first text element if it's an array
+          const textItem = message.content.find(item => item.type === 'text');
+          if (textItem && textItem.text) {
+            titleText = textItem.text.substring(0, 30).trim();
+          }
+        }
+        
+        if (titleText) {
+          sessionStorage[sessionId].title = titleText + (titleText.length >= 30 ? '...' : '');
+        }
       }
       
       return {

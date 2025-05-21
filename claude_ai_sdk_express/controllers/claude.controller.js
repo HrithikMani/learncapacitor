@@ -1,11 +1,113 @@
+// controllers/claude.controller.js
 require('dotenv').config();
 
-// Import Anthropic from the AI SDK
+// Import dependencies
 const { anthropic } = require('@ai-sdk/anthropic');
-const { generateText } = require('ai');
-
-// Import conversation service
+const { generateText, streamText, experimental_createMCPClient } = require('ai');
 const conversationService = require('../services/conversation.service');
+
+// Global constants
+const DEFAULT_MODEL = 'claude-3-7-sonnet-20250219';
+const DEFAULT_MAX_TOKENS = 1000;
+const DEFAULT_TEMPERATURE = 0.7;
+const DEFAULT_SYSTEM_PROMPT = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest. You have access to various tools to help you. You need to take whatever response you get from the tool and give a human-like response to the user.";
+const MAX_TOOL_STEPS = 10;
+const MCP_SERVICE_URL = "http://localhost:8081/sse";
+const MCP_SERVICE_NAME = "Calculator service";
+
+/**
+ * Initialize MCP client and get available tools
+ * @returns {Promise<Object>} Available tools or null if error
+ */
+const initializeTools = async () => {
+  try {
+    const mcpClient = await experimental_createMCPClient({
+      transport: {
+        type: "sse",
+        url: MCP_SERVICE_URL,
+      },
+      name: MCP_SERVICE_NAME,
+    });
+    const tools = await mcpClient.tools();
+    console.log(`Initialized ${Object.keys(tools).length} tools from MCP client`);
+    return tools;
+  } catch (error) {
+    console.error('Failed to initialize tools:', error);
+    return null;
+  }
+};
+
+/**
+ * Initialize conversation and retrieve message history
+ * @param {string} providedSessionId - Optional session ID
+ * @param {string} prompt - User message
+ * @returns {Promise<Object>} Conversation data and messages
+ */
+const initializeConversation = async (providedSessionId, prompt) => {
+  let sessionId = providedSessionId;
+  let conversation;
+
+  // If no sessionId provided, create a new conversation
+  if (!sessionId) {
+    const result = await conversationService.createConversation();
+    sessionId = result.sessionId;
+    conversation = result;
+    console.log('Created new conversation with ID:', sessionId);
+  } else {
+    // Get conversation from storage
+    conversation = await conversationService.getConversation(sessionId);
+  }
+
+  // Format messages for the AI SDK
+  const messages = conversation.messages.map(msg => ({
+    role: msg.role,
+    content: msg.content
+  }));
+
+  // Add the current user message to the array
+  messages.push({ role: 'user', content: prompt });
+
+  // Store the user message in the conversation history
+  await conversationService.addMessage(sessionId, {
+    role: 'user',
+    content: prompt
+  });
+
+  return { sessionId, conversation, messages };
+};
+
+/**
+ * Set up SSE response headers
+ * @param {Object} res - Express response object
+ */
+const setupSSEHeaders = (res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+};
+
+/**
+ * Handle errors in SSE responses
+ * @param {Object} res - Express response object
+ * @param {Error} error - Error object
+ */
+const handleSSEError = (res, error) => {
+  console.error('Streaming error:', error);
+  
+  if (!res.headersSent) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Streaming error',
+      error: error.message
+    });
+  } else {
+    res.write(`data: ${JSON.stringify({ 
+      type: 'error', 
+      error: error.message 
+    })}\n\n`);
+    res.end();
+  }
+};
 
 // Text completion endpoint controller
 exports.chatCompletion = async (req, res) => {
@@ -15,10 +117,11 @@ exports.chatCompletion = async (req, res) => {
     const { 
       prompt, 
       sessionId: providedSessionId, 
-      model = 'claude-3-7-sonnet-20250219', 
-      maxTokens = 1000,
-      system = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest.",
-      temperature = 0.7
+      model = DEFAULT_MODEL, 
+      maxTokens = DEFAULT_MAX_TOKENS,
+      system = DEFAULT_SYSTEM_PROMPT,
+      temperature = DEFAULT_TEMPERATURE,
+      useTools = false  // Parameter to toggle tool usage
     } = req.body;
     
     // Validate request parameters
@@ -26,19 +129,8 @@ exports.chatCompletion = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Prompt is required' });
     }
 
-    let sessionId = providedSessionId;
-    let conversation;
-
-    // If no sessionId provided, create a new conversation
-    if (!sessionId) {
-      const result = await conversationService.createConversation();
-      sessionId = result.sessionId;
-      conversation = result;
-      console.log('Created new conversation with ID:', sessionId);
-    } else {
-      // Get previous messages from storage
-      conversation = await conversationService.getConversation(sessionId);
-    }
+    // Initialize conversation and get messages
+    const { sessionId, conversation, messages } = await initializeConversation(providedSessionId, prompt);
 
     // Log the parameters for debugging
     console.log('Request parameters:', {
@@ -46,59 +138,86 @@ exports.chatCompletion = async (req, res) => {
       sessionId,
       model,
       maxTokens,
-      temperature
+      temperature,
+      useTools
     });
-
-    // Convert previous messages to the format expected by AI SDK
-    const messages = conversation.messages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
-    
-    // Add the current user message
-    messages.push({ role: 'user', content: prompt });
 
     console.log('Calling Claude API using AI SDK...');
     
     try {
-      // Use the AI SDK to generate text
-      const result = await generateText({
+      let result;
+      let tools = null;
+      
+      // Get tools if requested
+      if (useTools) {
+        tools = await initializeTools();
+      }
+
+      // Generate text with or without tools
+      const generateOptions = {
         model: anthropic(model),
-        messages: messages,
-        system: system,
+        messages,
+        system,
         max_tokens: maxTokens,
-        temperature: temperature
-      });
+        temperature
+      };
+
+      if (tools && Object.keys(tools).length > 0) {
+        // Add tool-specific options
+        generateOptions.tools = tools;
+        generateOptions.maxSteps = MAX_TOOL_STEPS;
+        
+        result = await generateText(generateOptions);
+        
+        // Store all messages from the tool interaction
+        if (result.response && result.response.messages && result.response.messages.length > 0) {
+          // Store each message from the tool interaction
+          for (const msg of result.response.messages) {
+            await conversationService.addMessage(sessionId, {
+              role: msg.role,
+              content: msg.content,
+              id: msg.id
+            });
+          }
+        }
+      } else {
+        // Standard text generation without tools
+        result = await generateText(generateOptions);
+        
+        // Store assistant's response (we already stored user's message earlier)
+        await conversationService.addMessage(sessionId, {
+          role: 'assistant',
+          content: result.text
+        });
+      }
 
       console.log('Claude API response received');
-      
-      // Add messages to conversation storage
-      await conversationService.addMessage(sessionId, {
-        role: 'user',
-        content: prompt
-      });
-      
-      await conversationService.addMessage(sessionId, {
-        role: 'assistant',
-        content: result.text
-      });
 
-      // Get updated conversation to include title
+      // Get updated conversation to include any title changes
       const updatedConversation = await conversationService.getConversation(sessionId);
+
+      // Prepare response object
+      const responseData = {
+        message: result.text,
+        usage: {
+          input_tokens: result.usage?.input_tokens || 0,
+          output_tokens: result.usage?.output_tokens || 0
+        },
+        model,
+        session_id: sessionId,
+        title: updatedConversation.title
+      };
+      
+      // Add tool-specific fields if tools were used
+      if (tools && Object.keys(tools).length > 0) {
+        responseData.toolCalls = result.toolCalls || [];
+        responseData.toolResults = result.toolResults || [];
+      }
 
       // Return response
       res.status(200).json({
         status: 'success',
-        data: {
-          message: result.text,
-          usage: {
-            input_tokens: result.usage?.input_tokens || 0,
-            output_tokens: result.usage?.output_tokens || 0
-          },
-          model: model,
-          session_id: sessionId,
-          title: updatedConversation.title
-        }
+        data: responseData
       });
     } catch (apiError) {
       console.error('Claude API specific error:', apiError);
@@ -118,6 +237,92 @@ exports.chatCompletion = async (req, res) => {
       message: 'Failed to get response from Claude',
       error: error.message
     });
+  }
+};
+
+// Stream chat with Claude
+exports.streamChat = async (req, res) => {
+  try {
+    const { 
+      prompt, 
+      sessionId: providedSessionId, 
+      model = DEFAULT_MODEL, 
+      maxTokens = DEFAULT_MAX_TOKENS,
+      system = DEFAULT_SYSTEM_PROMPT,
+      temperature = DEFAULT_TEMPERATURE
+    } = req.body;
+    
+    if (!prompt) {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Prompt is required' 
+      });
+    }
+
+    // Initialize conversation and get formatted messages
+    const { sessionId, conversation, messages } = await initializeConversation(providedSessionId, prompt);
+
+    // Initialize tools for streaming
+    const tools = await initializeTools();
+
+    // Set up streaming response headers
+    setupSSEHeaders(res);
+
+    // Send session info in the first chunk
+    res.write(`data: ${JSON.stringify({
+      type: 'session',
+      sessionId: sessionId,
+      title: conversation.title
+    })}\n\n`);
+
+    let fullTextResponse = '';
+
+    // Stream response from Claude with tools
+    const response = await streamText({
+      model: anthropic(model),
+      messages,
+      system,
+      max_tokens: maxTokens,
+      temperature,
+      tools,
+      maxSteps: MAX_TOOL_STEPS,
+      onFinish({ text, finishReason, usage, response }) {
+        console.log(JSON.stringify(response.messages, null, 2));
+        
+        // Store all messages from the response array in MongoDB
+        if (response && response.messages && response.messages.length > 0) {
+          // Process and store each message regardless of role
+          response.messages.forEach(async (msg) => {
+            // Store the complete message with its structure intact
+            await conversationService.addMessage(sessionId, {
+              role: msg.role,
+              content: msg.content,
+              id: msg.id
+            });
+          });
+        }
+      }
+    });
+
+    // Process the text stream
+    for await (const chunk of response.textStream) {
+      // Send each chunk as an SSE event
+      res.write(`data: ${JSON.stringify({
+        type: 'chunk',
+        text: chunk || ''
+      })}\n\n`);
+      
+      // Accumulate the full response
+      if (chunk) {
+        fullTextResponse += chunk;
+      }
+    }
+
+    // Send completion event
+    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    res.end();
+  } catch (error) {
+    handleSSEError(res, error);
   }
 };
 
@@ -306,134 +511,5 @@ exports.createConversation = async (req, res) => {
       message: 'Failed to create conversation',
       error: error.message
     });
-  }
-};
-
-// Stream chat with Claude
-exports.streamChat = async (req, res) => {
-  try {
-    const { 
-      prompt, 
-      sessionId: providedSessionId, 
-      model = 'claude-3-7-sonnet-20250219', 
-      maxTokens = 1000,
-      system = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest.",
-      temperature = 0.7
-    } = req.body;
-    
-    if (!prompt) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Prompt is required' 
-      });
-    }
-
-    let sessionId = providedSessionId;
-    let conversation;
-
-    // If no sessionId provided, create a new conversation
-    if (!sessionId) {
-      const result = await conversationService.createConversation();
-      sessionId = result.sessionId;
-      conversation = result;
-    } else {
-      // Get conversation
-      conversation = await conversationService.getConversation(sessionId);
-    }
-
-    // Get previous messages
-    const messages = conversation.messages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
-    
-    // Add current user message
-    messages.push({ role: 'user', content: prompt });
-
-    // Store user message
-    await conversationService.addMessage(sessionId, {
-      role: 'user',
-      content: prompt
-    });
-
-    // Set up response headers for streaming
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    let fullResponse = '';
-
-    try {
-      // Import the streamText function
-      const { streamText } = require('ai');
-      
-      // Stream response from Claude
-      const stream = await streamText({
-        model: anthropic(model),
-        messages,
-        system,
-        max_tokens: maxTokens,
-        temperature
-      });
-
-      // Send session info in the first chunk
-      res.write(`data: ${JSON.stringify({
-        type: 'session',
-        sessionId: sessionId,
-        title: conversation.title
-      })}\n\n`);
-
-      // Process the stream
-      for await (const chunk of stream) {
-        // Send each chunk to the client
-        res.write(`data: ${JSON.stringify({
-          type: 'chunk',
-          text: chunk.text || ''
-        })}\n\n`);
-        
-        // Accumulate the full response
-        if (chunk.text) {
-          fullResponse += chunk.text;
-        }
-      }
-
-      // Store assistant message after streaming completes
-      await conversationService.addMessage(sessionId, {
-        role: 'assistant',
-        content: fullResponse
-      });
-
-      // End the response
-      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-      res.end();
-    } catch (error) {
-      console.error('Error in streamChat:', error);
-      
-      // If headers haven't been sent yet, send error response
-      if (!res.headersSent) {
-        res.status(500).json({ 
-          status: 'error', 
-          message: 'Streaming error',
-          error: error.message
-        });
-      } else {
-        // If headers have been sent, send error as SSE event
-        res.write(`data: ${JSON.stringify({ 
-          type: 'error', 
-          error: error.message 
-        })}\n\n`);
-        res.end();
-      }
-    }
-  } catch (error) {
-    console.error('General error in streamChat:', error);
-    
-    if (!res.headersSent) {
-      res.status(500).json({ 
-        status: 'error', 
-        message: 'Failed to process request',
-        error: error.message
-      });
-    }
   }
 };
