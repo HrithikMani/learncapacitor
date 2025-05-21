@@ -19,6 +19,8 @@ function App() {
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [currentTitle, setCurrentTitle] = useState('Chat Session');
   const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
+  const [streamingResponse, setStreamingResponse] = useState(null);
+  const [streamConnection, setStreamConnection] = useState(null);
   
   // Keep MCP states for the UI - in a real app this might be replaced
   const [mcpList, setMcpList] = useState([
@@ -30,15 +32,18 @@ function App() {
   
   // Load conversations on mount
   useEffect(() => {
+    console.log('App mounted, fetching conversations');
     fetchConversations();
   }, []);
   
   // Load conversation when sessionId changes
   useEffect(() => {
     if (currentSessionId) {
+      console.log(`Session ID changed to ${currentSessionId}, fetching history`);
       fetchConversationHistory(currentSessionId);
     } else {
       // If no session, start with empty messages
+      console.log('No session ID, clearing messages');
       setMessages([]);
     }
   }, [currentSessionId]);
@@ -46,9 +51,20 @@ function App() {
   // Scroll to bottom of messages
   useEffect(() => {
     if (messagesEndRef.current) {
+      console.log('Scrolling to bottom of messages');
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages]);
+  }, [messages, streamingResponse]);
+  
+  // Cleanup streaming connection on unmount
+  useEffect(() => {
+    return () => {
+      if (streamConnection && streamConnection.cancel) {
+        console.log('Cleaning up stream connection');
+        streamConnection.cancel();
+      }
+    };
+  }, [streamConnection]);
   
   // Show a toast notification
   const showToast = (message, type = 'info') => {
@@ -61,6 +77,7 @@ function App() {
   // Fetch all conversations
   const fetchConversations = async () => {
     try {
+      console.log('Fetching all conversations');
       const response = await claudeApiService.getAllConversations();
       if (response.status === 'success') {
         // Format the conversations for the UI
@@ -71,6 +88,7 @@ function App() {
           preview: `${conv.messageCount} messages`,
           messageCount: conv.messageCount
         }));
+        console.log(`Retrieved ${formattedConversations.length} conversations`);
         setConversations(formattedConversations);
       }
     } catch (error) {
@@ -94,8 +112,10 @@ function App() {
   // Fetch conversation history
   const fetchConversationHistory = async (sessionId) => {
     try {
+      console.log(`Fetching history for session ${sessionId}`);
       const response = await claudeApiService.getHistory(sessionId);
       if (response.status === 'success') {
+        console.log(`Retrieved ${response.data.messages.length} messages`);
         setMessages(response.data.messages.map((msg, index) => ({
           id: index,
           sender: msg.role,
@@ -116,6 +136,13 @@ function App() {
     sendMessage: async () => {
       if (inputMessage.trim() === '') return;
       
+      // Cancel any existing stream
+      if (streamConnection && streamConnection.cancel) {
+        console.log('Cancelling existing stream');
+        streamConnection.cancel();
+        setStreamConnection(null);
+      }
+      
       // Create and display user message immediately
       const userMessage = {
         id: Date.now(),
@@ -124,6 +151,7 @@ function App() {
         timestamp: new Date().toISOString()
       };
       
+      console.log('Adding user message to chat');
       setMessages(prev => [...prev, userMessage]);
       const currentInput = inputMessage;
       setInputMessage('');
@@ -131,32 +159,111 @@ function App() {
       // Show typing indicator
       setIsTyping(true);
       
+      // Create AI response placeholder that will be updated as it streams
+      console.log('Creating streaming response placeholder');
+      const aiMessageId = Date.now() + 1;
+      setStreamingResponse({
+        id: aiMessageId,
+        sender: 'ai',
+        content: '',
+        timestamp: new Date().toISOString(),
+        isStreaming: true
+      });
+      
       let sessionId = currentSessionId;
       
       try {
-        // If no current session, a new one will be created automatically by the API
-        const response = await claudeApiService.sendMessage(sessionId, currentInput);
-        
-        if (response.status === 'success') {
-          // If this was a new conversation, update the sessionId
-          if (!sessionId) {
-            setCurrentSessionId(response.data.session_id);
-            setCurrentTitle(response.data.title);
-            
-            // Refresh conversations list
-            fetchConversations();
+        console.log(`Starting stream with${sessionId ? '' : 'out'} session ID`);
+        // Use streaming API
+        const connection = claudeApiService.streamMessage(
+          sessionId,
+          currentInput,
+          'claude-3-7-sonnet-20250219',
+          {
+            onSession: (data) => {
+              console.log('Session data received:', data);
+              // If this was a new conversation, update the sessionId
+              if (!sessionId) {
+                console.log(`New session created: ${data.sessionId}`);
+                setCurrentSessionId(data.sessionId);
+                setCurrentTitle(data.title);
+                sessionId = data.sessionId;
+                
+                // Refresh conversations list
+                fetchConversations();
+              }
+            },
+            onChunk: (chunk) => {
+              console.log('Received chunk:', chunk ? chunk.length : 0, 'chars');
+              // Update the streaming response with each new chunk
+              setStreamingResponse(prev => {
+                if (!prev) {
+                  console.warn('No streaming response object to update');
+                  return {
+                    id: Date.now(),
+                    sender: 'ai',
+                    content: chunk || '',
+                    timestamp: new Date().toISOString(),
+                    isStreaming: true
+                  };
+                }
+                
+                // Basic string content
+                return {
+                  ...prev,
+                  content: prev.content + (chunk || '')
+                };
+              });
+            },
+            onComplete: () => {
+              console.log('Stream completed');
+              setStreamingResponse(prev => {
+                if (!prev) {
+                  console.warn('No streaming response to finalize');
+                  return null;
+                }
+                
+                console.log('Finalizing message with content length:', 
+                  typeof prev.content === 'string' ? prev.content.length : 'complex structure');
+                
+                // Add completed message to messages
+                setMessages(messages => [...messages, {
+                  id: prev.id,
+                  sender: 'ai',
+                  content: prev.content,
+                  timestamp: prev.timestamp
+                }]);
+                return null; // Clear streaming state
+              });
+              setIsTyping(false);
+              setStreamConnection(null);
+              
+              // Refresh conversations list to update message count
+              fetchConversations();
+            },
+            onError: (error) => {
+              console.error('Error streaming message:', error);
+              // Add error message to the chat
+              setMessages(prev => [...prev, {
+                id: Date.now() + 1,
+                sender: 'system',
+                content: 'Sorry, there was an error sending your message. Please try again.',
+                timestamp: new Date().toISOString()
+              }]);
+              setStreamingResponse(null);
+              setIsTyping(false);
+              setStreamConnection(null);
+              showToast('Failed to send message', 'error');
+            }
           }
-          
-          // Add AI response
-          setMessages(prev => [...prev, {
-            id: Date.now() + 1,
-            sender: 'ai',
-            content: response.data.message,
-            timestamp: new Date().toISOString()
-          }]);
-        }
+        );
+        
+        // Store the connection to allow cancellation
+        setStreamConnection(connection);
       } catch (error) {
-        console.error('Error sending message:', error);
+        console.error('Error setting up streaming:', error);
+        setStreamingResponse(null);
+        setIsTyping(false);
         // Add error message to the chat
         setMessages(prev => [...prev, {
           id: Date.now() + 1,
@@ -165,8 +272,6 @@ function App() {
           timestamp: new Date().toISOString()
         }]);
         showToast('Failed to send message', 'error');
-      } finally {
-        setIsTyping(false);
       }
     },
     
@@ -181,12 +286,14 @@ function App() {
   const conversationsService = {
     // Select a conversation
     selectConversation: (conversationId) => {
+      console.log(`Selecting conversation: ${conversationId}`);
       setCurrentSessionId(conversationId);
       setShowChats(false);
     },
     
     // Start a new chat
     startNewChat: async () => {
+      console.log('Starting new chat');
       setCurrentSessionId(null);
       setCurrentTitle('New Chat');
       setMessages([]);
@@ -196,6 +303,7 @@ function App() {
     // Delete conversation
     deleteConversation: async (conversationId) => {
       try {
+        console.log(`Deleting conversation: ${conversationId}`);
         await claudeApiService.deleteConversation(conversationId);
         showToast('Conversation deleted', 'success');
         
@@ -274,6 +382,7 @@ function App() {
 
       <MessageList 
         messages={messages}
+        streamingResponse={streamingResponse}
         isTyping={isTyping}
         activeMCPs={activeMCPs}
         mcpList={mcpList}

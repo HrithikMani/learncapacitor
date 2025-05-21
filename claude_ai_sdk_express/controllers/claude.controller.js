@@ -84,6 +84,9 @@ const setupSSEHeaders = (res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  // Allow CORS for streaming
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
 };
 
 /**
@@ -242,6 +245,9 @@ exports.chatCompletion = async (req, res) => {
 
 // Stream chat with Claude
 exports.streamChat = async (req, res) => {
+  // Create a heartbeat interval to keep the connection alive
+  let heartbeatInterval = null;
+  
   try {
     const { 
       prompt, 
@@ -259,14 +265,24 @@ exports.streamChat = async (req, res) => {
       });
     }
 
+    console.log('Stream request received with prompt:', prompt.substring(0, 30) + '...');
+
     // Initialize conversation and get formatted messages
     const { sessionId, conversation, messages } = await initializeConversation(providedSessionId, prompt);
+    console.log(`Using session ID: ${sessionId}`);
 
     // Initialize tools for streaming
     const tools = await initializeTools();
+    console.log(`Tools initialized: ${tools ? Object.keys(tools).length : 'none'}`);
 
     // Set up streaming response headers
     setupSSEHeaders(res);
+    console.log('SSE headers set up');
+
+    // Set up a heartbeat to keep the connection alive
+    heartbeatInterval = setInterval(() => {
+      res.write(": heartbeat\n\n");
+    }, 15000);
 
     // Send session info in the first chunk
     res.write(`data: ${JSON.stringify({
@@ -274,54 +290,106 @@ exports.streamChat = async (req, res) => {
       sessionId: sessionId,
       title: conversation.title
     })}\n\n`);
+    console.log('Session info sent');
 
     let fullTextResponse = '';
 
-    // Stream response from Claude with tools
-    const response = await streamText({
-      model: anthropic(model),
-      messages,
-      system,
-      max_tokens: maxTokens,
-      temperature,
-      tools,
-      maxSteps: MAX_TOOL_STEPS,
-      onFinish({ text, finishReason, usage, response }) {
-        console.log(JSON.stringify(response.messages, null, 2));
-        
-        // Store all messages from the response array in MongoDB
-        if (response && response.messages && response.messages.length > 0) {
-          // Process and store each message regardless of role
-          response.messages.forEach(async (msg) => {
-            // Store the complete message with its structure intact
-            await conversationService.addMessage(sessionId, {
-              role: msg.role,
-              content: msg.content,
-              id: msg.id
+    try {
+      console.log('Starting stream with Claude API...');
+      // Stream response from Claude with tools
+      const response = await streamText({
+        model: anthropic(model),
+        messages,
+        system,
+        max_tokens: maxTokens,
+        temperature,
+        tools,
+        maxSteps: MAX_TOOL_STEPS,
+        onFinish({ text, finishReason, usage, response }) {
+          console.log('Stream finished, final message length:', text.length);
+          console.log('Response messages structure:', 
+            response.messages ? `${response.messages.length} messages` : 'No messages');
+          
+          // Store all messages from the response array in MongoDB
+          if (response && response.messages && response.messages.length > 0) {
+            console.log(`Storing ${response.messages.length} messages in database`);
+            // Process and store each message regardless of role
+            response.messages.forEach(async (msg) => {
+              // Store the complete message with its structure intact
+              await conversationService.addMessage(sessionId, {
+                role: msg.role,
+                content: msg.content,
+                id: msg.id
+              });
             });
-          });
+          }
+        }
+      });
+
+      console.log('Processing text stream...');
+      // Process the text stream
+      for await (const chunk of response.textStream) {
+        // Log chunks but only print a short preview
+        if (chunk && chunk.length > 0) {
+          console.log(`Sending chunk: ${chunk.length} chars`);
+        }
+        
+        // Send each chunk as an SSE event
+        res.write(`data: ${JSON.stringify({
+          type: 'chunk',
+          text: chunk || ''
+        })}\n\n`);
+        
+        // Accumulate the full response
+        if (chunk) {
+          fullTextResponse += chunk;
         }
       }
-    });
 
-    // Process the text stream
-    for await (const chunk of response.textStream) {
-      // Send each chunk as an SSE event
-      res.write(`data: ${JSON.stringify({
-        type: 'chunk',
-        text: chunk || ''
-      })}\n\n`);
+      console.log('Stream complete, sending done event');
+      // Send completion event
+      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
       
-      // Accumulate the full response
-      if (chunk) {
-        fullTextResponse += chunk;
+      // Clear the heartbeat interval
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+      
+      res.end();
+    } catch (streamError) {
+      console.error('Error during streaming:', streamError);
+      
+      // Clear the heartbeat interval if it exists
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+      
+      // Send error event if headers have been sent
+      if (res.headersSent) {
+        res.write(`data: ${JSON.stringify({ 
+          type: 'error', 
+          error: streamError.message 
+        })}\n\n`);
+        res.end();
+      } else {
+        // Otherwise send a JSON error response
+        res.status(500).json({ 
+          status: 'error', 
+          message: 'Failed to stream response',
+          error: streamError.message
+        });
       }
     }
-
-    // Send completion event
-    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-    res.end();
   } catch (error) {
+    console.error('General error in streamChat:', error);
+    
+    // Clear the heartbeat interval if it exists
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+    }
+    
     handleSSEError(res, error);
   }
 };

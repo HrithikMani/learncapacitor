@@ -2,7 +2,14 @@ import React from 'react';
 import Message from './Message';
 import TypingIndicator from './TypingIndicator';
 
-const MessageList = ({ messages, isTyping, activeMCPs, mcpList, onCopyMessage, messagesEndRef }) => {
+const MessageList = ({ messages, streamingResponse, isTyping, activeMCPs, mcpList, onCopyMessage, messagesEndRef }) => {
+  // Debug log for render
+  console.log('MessageList rendering with:', {
+    messageCount: messages.length,
+    streamingResponse: streamingResponse ? 'present' : 'none',
+    isTyping
+  });
+  
   // Format timestamp
   const formatTime = (timestamp) => {
     const date = new Date(timestamp);
@@ -28,6 +35,7 @@ const MessageList = ({ messages, isTyping, activeMCPs, mcpList, onCopyMessage, m
     <div className="messages-container">
       <div className="date-divider">Today</div>
       
+      {/* Regular messages */}
       {messages.map(message => (
         <Message 
           key={message.id}
@@ -38,7 +46,20 @@ const MessageList = ({ messages, isTyping, activeMCPs, mcpList, onCopyMessage, m
         />
       ))}
       
-      {isTyping && <TypingIndicator activeMCPName={getActiveMCPDetails()} />}
+      {/* Streaming response if active */}
+      {streamingResponse && (
+        <Message 
+          key={`streaming-${streamingResponse.id}`}
+          message={streamingResponse}
+          activeMCPName={getActiveMCPDetails()}
+          formatTime={formatTime}
+          onCopyMessage={onCopyMessage}
+          isStreaming={true}
+        />
+      )}
+      
+      {/* Show typing indicator only when no streaming is happening */}
+      {isTyping && !streamingResponse && <TypingIndicator activeMCPName={getActiveMCPDetails()} />}
       
       <div ref={messagesEndRef} />
     </div>

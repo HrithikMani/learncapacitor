@@ -10,7 +10,7 @@ const headers = {
 };
 
 const claudeApiService = {
-  // Chat with Claude
+  // Chat with Claude (original method)
   sendMessage: async (sessionId, prompt, model = 'claude-3-7-sonnet-20250219') => {
     try {
       const response = await fetch(`${API_BASE_URL}/chat`, {
@@ -35,6 +35,161 @@ const claudeApiService = {
       console.error('API Error:', error);
       throw error;
     }
+  },
+  
+  // Stream chat with Claude - improved direct streaming
+  streamMessage: (sessionId, prompt, model = 'claude-3-7-sonnet-20250219', callbacks) => {
+    console.log('Starting streaming request');
+    
+    // Create an AbortController to allow canceling the fetch
+    const controller = new AbortController();
+    const signal = controller.signal;
+    
+    // Make a POST request with proper headers for streaming
+    fetch(`${API_BASE_URL}/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        sessionId,
+        prompt,
+        model,
+        maxTokens: 1000,
+        temperature: 0.7,
+        system: "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest."
+      }),
+      signal: signal
+    })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`Stream request failed: ${response.status} ${response.statusText}`);
+      }
+      
+      if (!response.body) {
+        throw new Error('ReadableStream not supported in this browser');
+      }
+      
+      console.log('Stream response received, processing chunks');
+      
+      // Get a reader from the response body stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      // Function to process stream chunks
+      function processStream() {
+        return reader.read().then(({ done, value }) => {
+          if (done) {
+            console.log('Stream complete');
+            
+            // Check if there's any remaining data in the buffer
+            if (buffer.trim().length > 0) {
+              processBuffer(buffer);
+            }
+            
+            callbacks.onComplete();
+            return;
+          }
+          
+          // Decode the chunk and add it to the buffer
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          
+          // Process complete SSE messages
+          const lines = buffer.split('\n\n');
+          
+          // Keep the last line in buffer if it's incomplete
+          buffer = lines.pop() || '';
+          
+          // Process each complete line
+          for (const line of lines) {
+            if (line.trim() === '') continue; // Skip empty lines
+            if (line.trim().startsWith(':')) continue; // Skip comments/heartbeats
+            
+            processLine(line);
+          }
+          
+          // Continue reading
+          return processStream();
+        }).catch(error => {
+          console.error('Stream reading error:', error);
+          callbacks.onError(error);
+        });
+      }
+      
+      // Helper function to process a single SSE message line
+      function processLine(line) {
+        // Extract the data part
+        const dataMatch = line.match(/data: (.*)/);
+        if (!dataMatch) {
+          console.log('Non-data line:', line);
+          return;
+        }
+        
+        try {
+          const data = JSON.parse(dataMatch[1]);
+          
+          if (data.type === 'session') {
+            console.log('Session data:', data);
+            callbacks.onSession(data);
+          } else if (data.type === 'chunk') {
+            // Only log if there's actual content
+            if (data.text && data.text.length > 0) {
+              console.log(`Received chunk (${data.text.length} chars)`);
+            }
+            callbacks.onChunk(data.text);
+          } else if (data.type === 'done') {
+            console.log('Stream marked as done');
+            // We'll call onComplete when the stream is actually done
+          } else if (data.type === 'error') {
+            console.error('Stream error:', data.error);
+            callbacks.onError(new Error(data.error));
+            reader.cancel();
+          }
+        } catch (jsonError) {
+          console.error('Error parsing JSON from stream:', jsonError);
+          console.log('Raw data:', dataMatch[1]);
+        }
+      }
+      
+      // Helper function to process any remaining buffer content
+      function processBuffer(buffer) {
+        const lines = buffer.split('\n');
+        
+        for (const line of lines) {
+          if (line.trim() === '') continue;
+          if (line.trim().startsWith(':')) continue;
+          
+          // Extract and process data
+          const dataMatch = line.match(/data: (.*)/);
+          if (dataMatch) {
+            try {
+              const data = JSON.parse(dataMatch[1]);
+              
+              if (data.type === 'chunk') {
+                callbacks.onChunk(data.text);
+              }
+            } catch (error) {
+              console.error('Error processing buffer remainder:', error);
+            }
+          }
+        }
+      }
+      
+      // Start processing the stream
+      return processStream();
+    })
+    .catch(error => {
+      console.error('Stream fetch error:', error);
+      callbacks.onError(error);
+    });
+    
+    // Return a function to abort the fetch if needed
+    return {
+      cancel: () => {
+        console.log('Manually cancelling stream');
+        controller.abort();
+      }
+    };
   },
   
   // Get conversation history

@@ -1279,3 +1279,41 @@ input:checked + .toggle-slider:before {
 .close-modal-button:hover {
   background-color: var(--neutral-200);
 }
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cursor {
+  display: inline-block;
+  animation: blink 1s step-end infinite;
+  font-weight: bold;
+  margin-left: 1px;
+}
+
+.streaming .message-content {
+  border-left: 3px solid var(--primary-color);
+}
+/* Tool call styling */
+.tool-call, .tool-result {
+  background-color: var(--neutral-100);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin: 8px 0;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.tool-call-header, .tool-result-header {
+  font-weight: bold;
+  margin-bottom: 4px;
+  color: var(--primary-color);
+}
+
+.tool-call {
+  border-left: 3px solid var(--primary-color);
+}
+
+.tool-result {
+  border-left: 3px solid var(--success-color);
+}
