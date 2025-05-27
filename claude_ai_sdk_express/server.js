@@ -53,9 +53,14 @@ app.use(express.json()); // Parse JSON requests
 
 // Routes
 app.use('/api/claude', require('./routes/claude'));
+app.use('/api/mcp', require('./routes/mcp')); // Add MCP management routes
 
 // Basic health check endpoint
 app.get('/health', (req, res) => {
+  const mcpController = require('./controllers/mcp.controller');
+  const enabledServices = mcpController.getEnabledMCPServices();
+  const allServices = mcpController.getMCPServices();
+  
   res.status(200).json({ 
     status: 'OK', 
     message: 'Server is running',
@@ -66,6 +71,46 @@ app.get('/health', (req, res) => {
       api_key_set: !!process.env.API_KEY,
       mongodb_uri_set: !!process.env.MONGODB_URI,
       mongodb_connected: !!connectDB
+    },
+    mcpServices: {
+      total: allServices.length,
+      enabled: enabledServices.length,
+      disabled: allServices.length - enabledServices.length,
+      services: allServices.map(s => ({
+        id: s.id,
+        name: s.name,
+        type: s.type,
+        enabled: s.enabled,
+        url: s.url
+      }))
+    }
+  });
+});
+
+// Add a dedicated MCP status endpoint
+app.get('/mcp-status', (req, res) => {
+  const mcpController = require('./controllers/mcp.controller');
+  const enabledServices = mcpController.getEnabledMCPServices();
+  const allServices = mcpController.getMCPServices();
+  
+  res.status(200).json({
+    status: 'success',
+    data: {
+      summary: {
+        total: allServices.length,
+        enabled: enabledServices.length,
+        disabled: allServices.length - enabledServices.length
+      },
+      services: allServices.map(service => ({
+        id: service.id,
+        name: service.name,
+        type: service.type,
+        enabled: service.enabled,
+        url: service.url,
+        description: service.description,
+        createdAt: service.createdAt,
+        lastUpdated: service.lastUpdated
+      }))
     }
   });
 });
@@ -84,4 +129,23 @@ app.use((err, req, res, next) => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`Health check available at: http://localhost:${port}/health`);
+  console.log(`MCP status available at: http://localhost:${port}/mcp-status`);
+  console.log(`MCP management API available at: http://localhost:${port}/api/mcp`);
+  
+  // Log initial MCP services status
+  const mcpController = require('./controllers/mcp.controller');
+  const enabledServices = mcpController.getEnabledMCPServices();
+  const allServices = mcpController.getMCPServices();
+  
+  console.log(`\nMCP Services Status:`);
+  console.log(`  Total: ${allServices.length}`);
+  console.log(`  Enabled: ${enabledServices.length}`);
+  console.log(`  Disabled: ${allServices.length - enabledServices.length}`);
+  
+  if (enabledServices.length > 0) {
+    console.log(`\nEnabled Services:`);
+    enabledServices.forEach(service => {
+      console.log(`  - ${service.name} (${service.type}) - ${service.url}`);
+    });
+  }
 });

@@ -4,29 +4,17 @@ require('dotenv').config();
 const { anthropic } = require('@ai-sdk/anthropic');
 const { generateText, streamText, experimental_createMCPClient } = require('ai');
 const conversationService = require('../services/conversation.service');
+const mcpController = require('./mcp.controller'); // Import MCP controller
 
 // Global constants
 const DEFAULT_MODEL = 'claude-3-7-sonnet-20250219';
 const DEFAULT_MAX_TOKENS = 1000;
 const DEFAULT_TEMPERATURE = 0.7;
-const DEFAULT_SYSTEM_PROMPT = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest. You have access to various tools to help you. You need to take whatever response you get from the tool and give a human-like response to the user. if you don't find any specifi tool you are free to explore.";
+const DEFAULT_SYSTEM_PROMPT = "You are Claude, an AI assistant created by Anthropic. You are helpful, harmless, and honest. You have access to various tools to help you. You need to take whatever response you get from the tool and give a human-like response to the user. if you don't find any specific tool you are free to explore.";
 const MAX_TOOL_STEPS = 10;
 
-// Array of MCP service configurations
-const MCP_SERVICES = [
-  {
-    url: "http://localhost:8081/sse",
-    name: "Calculator service"
-  },
-  {
-    url: "http://localhost:8082/sse",
-    name: "Notepad service"
-  }
-  // Add more services as needed
-];
-
 /**
- * Initialize MCP clients and get available tools from all services
+ * Initialize MCP clients and get available tools from enabled services only
  * @returns {Promise<Object>} Combined available tools or empty object if all failed
  */
 const initializeTools = async () => {
@@ -34,8 +22,18 @@ const initializeTools = async () => {
   let successfulServices = 0;
   let failedServices = 0;
   
-  // Process each service in parallel
-  await Promise.all(MCP_SERVICES.map(async (service) => {
+  // Get only enabled MCP services
+  const enabledServices = mcpController.getEnabledMCPServices();
+  
+  if (enabledServices.length === 0) {
+    console.log('No enabled MCP services found');
+    return null;
+  }
+  
+  console.log(`Initializing tools from ${enabledServices.length} enabled MCP services`);
+  
+  // Process each enabled service in parallel
+  await Promise.all(enabledServices.map(async (service) => {
     try {
       console.log(`Initializing MCP client for ${service.name} at ${service.url}`);
       
@@ -52,15 +50,23 @@ const initializeTools = async () => {
       if (serviceTools && Object.keys(serviceTools).length > 0) {
         console.log(`Initialized ${Object.keys(serviceTools).length} tools from ${service.name}`);
         
-        // Add a prefix to avoid tool name collisions between services
-        // Or alternatively, merge tools directly if you prefer
+        // Add service metadata to each tool for better identification
         Object.entries(serviceTools).forEach(([toolName, toolObject]) => {
-          // Option 1: Use service name as prefix to prevent collisions
-          // const prefixedToolName = `${service.name.replace(/\s+/g, '_').toLowerCase()}.${toolName}`;
-          // combinedTools[prefixedToolName] = toolObject;
+          // Create a unique tool name by prefixing with service type or name
+          const prefixedToolName = service.type !== 'general' 
+            ? `${service.type}_${toolName}` 
+            : toolName;
           
-          // Option 2: Direct merge (will overwrite tools with same names)
-          combinedTools[toolName] = toolObject;
+          // Add service metadata to the tool
+          combinedTools[prefixedToolName] = {
+            ...toolObject,
+            _mcpService: {
+              id: service.id,
+              name: service.name,
+              type: service.type,
+              url: service.url
+            }
+          };
         });
         
         successfulServices++;
@@ -69,7 +75,7 @@ const initializeTools = async () => {
         failedServices++;
       }
     } catch (error) {
-      console.error(`Failed to initialize tools from ${service.name}:`, error);
+      console.error(`Failed to initialize tools from ${service.name}:`, error.message);
       failedServices++;
     }
   }));
@@ -77,6 +83,20 @@ const initializeTools = async () => {
   // Log summary of service connection results
   console.log(`MCP services summary: ${successfulServices} successful, ${failedServices} failed`);
   console.log(`Total tools available: ${Object.keys(combinedTools).length}`);
+  
+  // Log available tools by service
+  if (Object.keys(combinedTools).length > 0) {
+    const toolsByService = {};
+    Object.entries(combinedTools).forEach(([toolName, tool]) => {
+      const serviceName = tool._mcpService?.name || 'Unknown';
+      if (!toolsByService[serviceName]) {
+        toolsByService[serviceName] = [];
+      }
+      toolsByService[serviceName].push(toolName);
+    });
+    
+    console.log('Available tools by service:', JSON.stringify(toolsByService, null, 2));
+  }
   
   return Object.keys(combinedTools).length > 0 ? combinedTools : null;
 };
@@ -168,7 +188,7 @@ exports.chatCompletion = async (req, res) => {
       maxTokens = DEFAULT_MAX_TOKENS,
       system = DEFAULT_SYSTEM_PROMPT,
       temperature = DEFAULT_TEMPERATURE,
-      useTools = false  // Parameter to toggle tool usage
+      useTools = true  // Default to true now that we have dynamic MCP management
     } = req.body;
     
     // Validate request parameters
@@ -195,10 +215,10 @@ exports.chatCompletion = async (req, res) => {
       let result;
       let tools = null;
       
-      // Get tools from all services if requested
+      // Get tools from enabled services if requested
       if (useTools) {
         tools = await initializeTools();
-        console.log(`Using ${tools ? Object.keys(tools).length : 0} tools from all services`);
+        console.log(`Using ${tools ? Object.keys(tools).length : 0} tools from enabled services`);
       }
 
       // Generate text with or without tools
@@ -244,6 +264,9 @@ exports.chatCompletion = async (req, res) => {
       // Get updated conversation to include any title changes
       const updatedConversation = await conversationService.getConversation(sessionId);
 
+      // Get enabled services info for response
+      const enabledServices = mcpController.getEnabledMCPServices();
+
       // Prepare response object
       const responseData = {
         message: result.text,
@@ -253,7 +276,12 @@ exports.chatCompletion = async (req, res) => {
         },
         model,
         session_id: sessionId,
-        title: updatedConversation.title
+        title: updatedConversation.title,
+        mcpServices: {
+          enabled: enabledServices.length,
+          used: tools ? Object.keys(tools).length : 0,
+          services: enabledServices.map(s => ({ id: s.id, name: s.name, type: s.type }))
+        }
       };
       
       // Add tool-specific fields if tools were used
@@ -300,7 +328,8 @@ exports.streamChat = async (req, res) => {
       model = DEFAULT_MODEL, 
       maxTokens = DEFAULT_MAX_TOKENS,
       system = DEFAULT_SYSTEM_PROMPT,
-      temperature = DEFAULT_TEMPERATURE
+      temperature = DEFAULT_TEMPERATURE,
+      useTools = true  // Default to true now that we have dynamic MCP management
     } = req.body;
     
     if (!prompt) {
@@ -316,9 +345,15 @@ exports.streamChat = async (req, res) => {
     const { sessionId, conversation, messages } = await initializeConversation(providedSessionId, prompt);
     console.log(`Using session ID: ${sessionId}`);
 
-    // Initialize tools from all services
-    const tools = await initializeTools();
-    console.log(`Tools initialized from all services: ${tools ? Object.keys(tools).length : 'none'}`);
+    // Initialize tools from enabled services only
+    let tools = null;
+    let enabledServices = [];
+    
+    if (useTools) {
+      tools = await initializeTools();
+      enabledServices = mcpController.getEnabledMCPServices();
+      console.log(`Tools initialized from ${enabledServices.length} enabled services: ${tools ? Object.keys(tools).length : 'none'}`);
+    }
 
     // Set up streaming response headers
     setupSSEHeaders(res);
@@ -333,7 +368,12 @@ exports.streamChat = async (req, res) => {
     res.write(`data: ${JSON.stringify({
       type: 'session',
       sessionId: sessionId,
-      title: conversation.title
+      title: conversation.title,
+      mcpServices: {
+        enabled: enabledServices.length,
+        available: tools ? Object.keys(tools).length : 0,
+        services: enabledServices.map(s => ({ id: s.id, name: s.name, type: s.type }))
+      }
     })}\n\n`);
     console.log('Session info sent');
 
@@ -438,6 +478,9 @@ exports.streamChat = async (req, res) => {
     handleSSEError(res, error);
   }
 };
+
+// Rest of the existing controller methods remain unchanged...
+// (getHistory, clearHistory, getAllConversations, updateTitle, deleteConversation, createConversation)
 
 // Get conversation history controller
 exports.getHistory = async (req, res) => {
